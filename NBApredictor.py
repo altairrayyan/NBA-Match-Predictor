@@ -4,9 +4,12 @@ import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime
 import time
+from zoneinfo import ZoneInfo
+
+
+today_us = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
 load_dotenv(override=True)
 API_KEY = os.getenv("BALLDONTLIE_API_KEY", "").strip()
-
 def get_season():
     now = datetime.now()
     if now.month < 10:
@@ -15,12 +18,14 @@ def get_season():
         return now.year
 
 seasonsneeded = [get_season() - x for x in reversed(range(6))]
-
-def fetch_all_games(seasons):
+def fetch_all_games(seasons, start_date = None, end_date = None):
     url = "https://api.balldontlie.io/v1/games"
     headers = {"Authorization": API_KEY}
     params = {"seasons[]": seasons, "per_page": 100}
-
+    if start_date is not None:
+        params["start_date"] = start_date
+    if end_date is not None:
+        params["end_date"] = end_date
     all_games = []
     while True:
         response = requests.get(url, headers=headers, params=params)
@@ -47,11 +52,13 @@ def fetch_all_games(seasons):
     return all_games
 def fetch_season(season):
     path = f"games_{season}.csv"
-    if os.path.exists(path) and season != get_season():
+    is_current = (season == get_season())
+    if os.path.exists(path) and not is_current:
         print(f"Season {season}: pakai cache")
         return pd.read_csv(path)
-    print(f"Season {season}: fetch dari API...")
-    games = fetch_all_games([season])
+    end_date = datetime.now().strftime("%Y-%m-%d") if is_current else None
+    print(f"Season {season}: fetch dari API (end_date={end_date})...")
+    games = fetch_all_games([season], end_date=end_date)
     if not games:
         return pd.DataFrame()
     df_season = pd.json_normalize(games)
@@ -71,6 +78,7 @@ df = df[df['status'] == 'Final']
 df = df.loc[(df.season >= 2019) & (df.season.isin(seasonsneeded))].copy()
 df = df.sort_values('date', ascending=True).reset_index(drop=True)
 df1 = df.copy()
+df1 = df1.sort_values(["season", "date"]).reset_index(drop=True)
 def baselineelo(df1, elobase = 1500, homeadvantage = 60, kval = 20):
     games = df1.to_dict('records')
     elodictionary = {}
@@ -99,7 +107,44 @@ def baselineelo(df1, elobase = 1500, homeadvantage = 60, kval = 20):
 df_elo_result, latest_elo = baselineelo(df1)
 print(df_elo_result.head())
 
+games = fetch_all_games([get_season()], start_date=today_us, end_date=today_us)
+matchmendatang = pd.json_normalize(games)
+matchmendatang = matchmendatang.loc[matchmendatang['status_state'] == 'scheduled']
+
+dframe = df_elo_result.copy()
+dframe["home_res"] = (dframe["home_team_score"] > dframe["visitor_team_score"]).astype(int)
+dframe["elo_diff"] = (dframe["home_elo_before"] - dframe["visitor_elo_before"])
+print(dframe[["home_res", "elo_diff"]].head())
+print(dframe["home_res"].value_counts())
 
 
+if matchmendatang.empty:
+    print("No game today huhu")
+else:
+    probs = []
+    for game in matchmendatang.to_dict('records'):
+        home_elo = latest_elo.get(game['home_team.id'], 1500)
+        visitor_elo = latest_elo.get(game['visitor_team.id'], 1500)
+        prob_home = 1/(1+10**((visitor_elo - (home_elo + 60)) / 400))
+        probs.append(prob_home)
+    matchmendatang['prob_home_win'] = probs
+# Tampilkan Elo terbaru setiap tim
+teams = (
+    df_elo_result[
+        ["home_team.id", "home_team.full_name"]
+    ]
+    .rename(columns={
+        "home_team.id": "team_id",
+        "home_team.full_name": "team_name"
+    })
+    .drop_duplicates("team_id")
+)
+
+teams["elo"] = teams["team_id"].map(latest_elo)
+
+teams = teams.sort_values("elo", ascending=False)
+
+print("\n=== LATEST NBA ELO RATINGS ===")
+print(teams[["team_name", "elo"]].to_string(index=False))
 
 
